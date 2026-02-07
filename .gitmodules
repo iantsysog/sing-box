@@ -1,0 +1,8 @@
+[submodule "src/clients/apple"]
+	path = src/clients/apple
+	url = https://github.com/SagerNet/sing-box-for-apple.git
+	branch = dev
+[submodule "src/clients/android"]
+	path = src/clients/android
+	url = https://github.com/SagerNet/sing-box-for-android.git
+	branch = dev
