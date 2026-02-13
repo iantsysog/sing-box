@@ -20,6 +20,7 @@ on:
           - ALL
           - Binary
           - macOS
+          - iOS
           - SKIP
       version:
         description: "Version"
@@ -59,9 +60,10 @@ jobs:
           fi
 
           case "$mode_val" in
-            ALL) printf 'build_types=["binary","macos"]\n' >> "$GITHUB_OUTPUT" ;;
+            ALL) printf 'build_types=["binary","macos","ios"]\n' >> "$GITHUB_OUTPUT" ;;
             Binary) printf 'build_types=["binary"]\n' >> "$GITHUB_OUTPUT" ;;
             macOS) printf 'build_types=["macos"]\n' >> "$GITHUB_OUTPUT" ;;
+            iOS) printf 'build_types=["ios"]\n' >> "$GITHUB_OUTPUT" ;;
             *) printf 'build_types=[]\n' >> "$GITHUB_OUTPUT" ;;
           esac
   sync:
@@ -115,6 +117,11 @@ jobs:
       (needs.plan.outputs.is_schedule == 'false' || needs.sync.outputs.changes == 'true')
     runs-on: macos-latest
     needs: [plan, sync]
+    strategy:
+      matrix:
+        include:
+          - {arch: amd64}
+          - {arch: arm64}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -129,15 +136,22 @@ jobs:
         continue-on-error: true
         run: |
           VERSION="${{ inputs.version || github.sha }}"
-          TAGS="with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_ccm,with_ocm,badlinkname,tfogo_checklinkname0"
+          TAGS="with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_ccm,with_ocm,with_naive_outbound,badlinkname,tfogo_checklinkname0"
 
-          go build -trimpath \
-            -ldflags="-s -w -buildid= -X github.com/sagernet/sing-box/constant.Version=$VERSION" \
+          export GOTOOLCHAIN=local
+          go build -v -trimpath \
+            -ldflags="-s -buildid= -X github.com/sagernet/sing-box/constant.Version=$VERSION -X internal/godebug.defaultGODEBUG=multipathtcp=0 -checklinkname=0" \
             -tags="$TAGS" \
             -o sing-box \
             ./cmd/sing-box
-
-          PKG="sing-box-${VERSION}-${{ runner.os }}-$(go env GOARCH)"
+        env:
+          CGO_ENABLED: "1"
+          GOOS: darwin
+          GOARCH: ${{ matrix.arch }}
+      - working-directory: src
+        run: |
+          VERSION="${{ inputs.version || github.sha }}"
+          PKG="sing-box-${VERSION}-darwin-${{ matrix.arch }}"
           mkdir "$PKG"
           cp LICENSE sing-box "$PKG/"
 
@@ -148,7 +162,7 @@ jobs:
           gtar --zstd -cf "${PKG}.tar.zst" "$PKG"
       - uses: actions/upload-artifact@v6
         with:
-          name: binary
+          name: binary-darwin-${{ matrix.arch }}
           path: src/*.tar.zst
           retention-days: 7
           if-no-files-found: ignore
@@ -159,6 +173,12 @@ jobs:
       (needs.plan.outputs.is_schedule == 'false' || needs.sync.outputs.changes == 'true')
     runs-on: macos-26
     needs: [plan, sync]
+    strategy:
+      matrix:
+        include:
+          - {name: apple, arch: arm64}
+          - {name: intel, arch: x86_64}
+          - {name: universal, arch: universal}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -194,29 +214,36 @@ jobs:
 
           sed -i '' \
             -e 's/CODE_SIGN_STYLE = Automatic/CODE_SIGN_STYLE = Manual/g' \
-            -e 's/CODE_SIGN_IDENTITY = .*/CODE_SIGN_IDENTITY = "";/g' \
+            -e 's/CODE_SIGN_IDENTITY = .*/CODE_SIGN_IDENTITY = "-";/g' \
             -e 's/DEVELOPMENT_TEAM = .*/DEVELOPMENT_TEAM = "";/g' \
             sing-box.xcodeproj/project.pbxproj
+
+          VERSION="${{ inputs.version || github.sha }}"
+          DMG="SFM-${{ matrix.name }}-${VERSION}.dmg"
+
+          if [[ "${{ matrix.arch }}" == "universal" ]]; then
+            ARCH_OPTS=""
+          else
+            ARCH_OPTS="ARCHS=${{ matrix.arch }}"
+          fi
 
           xcodebuild build \
             -scheme SFM.System \
             -configuration Release \
             -destination "generic/platform=macOS" \
             -derivedDataPath ./DD \
-            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             ONLY_ACTIVE_ARCH=NO \
-            -skipPackagePluginValidation
+            -skipPackagePluginValidation \
+            $ARCH_OPTS
 
           APP=$(find . -name "*.app" -type d -print -quit)
 
           if [[ -z "$APP" ]]; then
             exit 0
           fi
-
-          VERSION="${{ inputs.version || github.sha }}"
-          DMG="SFM-${VERSION}.dmg"
 
           create-dmg \
             --volname "SFM" \
@@ -230,7 +257,84 @@ jobs:
           gtar --zstd -cf "${DMG}.tar.zst" "$DMG"
       - uses: actions/upload-artifact@v6
         with:
-          name: macos
+          name: macos-${{ matrix.name }}
           path: src/*.tar.zst
+          retention-days: 7
+          if-no-files-found: ignore
+  build-ios:
+    if: |
+      always() &&
+      contains(needs.plan.outputs.build_types, 'ios') &&
+      (needs.plan.outputs.is_schedule == 'false' || needs.sync.outputs.changes == 'true')
+    runs-on: macos-26
+    needs: [plan, sync]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+          submodules: recursive
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "^1.25.3"
+          cache: true
+      - working-directory: src
+        continue-on-error: true
+        run: |
+          if [[ ! -d "clients/apple" ]]; then
+            exit 0
+          fi
+
+          if ! command -v ldid >/dev/null 2>&1; then
+            brew install ldid zstd gnu-tar
+          fi
+
+          make lib_install
+          export PATH="$PATH:$(go env GOPATH)/bin"
+
+          go run ./cmd/internal/build_libbox -target apple -platform ios
+          mv Libbox.xcframework clients/apple/
+
+          cd clients/apple
+
+          if [[ ! -f "sing-box.xcodeproj/project.pbxproj" ]]; then
+            exit 0
+          fi
+
+          VERSION="${{ inputs.version || github.sha }}"
+          export XCODEPROJ_NAME=sing-box
+          export APPLICATION_NAME=sing-box
+          export SCHEME_NAME=SFI
+
+          xcodebuild \
+            -project $XCODEPROJ_NAME.xcodeproj \
+            -scheme $SCHEME_NAME \
+            -destination 'generic/platform=iOS' \
+            -configuration Debug \
+            -sdk iphoneos \
+            build install \
+            STRIP_INSTALLED_PRODUCT=NO \
+            ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=NO \
+            ENABLE_BITCODE=NO \
+            DSTROOT=packages/
+
+          ldid -SSFI/SFI.entitlements packages/Applications/$APPLICATION_NAME.app/$APPLICATION_NAME
+          ldid -SExtension/Extension.entitlements packages/Applications/$APPLICATION_NAME.app/PlugIns/Extension.appex/Extension
+          ldid -SIntentsExtension/IntentsExtension.entitlements packages/Applications/$APPLICATION_NAME.app/Extensions/IntentsExtension.appex/IntentsExtension
+
+          mkdir -p packages/Payload
+          cp -rp packages/Applications/$APPLICATION_NAME.app packages/Payload
+          cd packages
+          zip -qr $APPLICATION_NAME.tipa Payload
+          mv $APPLICATION_NAME.tipa ../../${APPLICATION_NAME}-${VERSION}.tipa
+          cd ../..
+
+          gtar --zstd -cf "sing-box-${VERSION}-ios.tipa.tar.zst" "sing-box-${VERSION}.tipa"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ios-tipa
+          path: src/*.tipa.tar.zst
           retention-days: 7
           if-no-files-found: ignore
