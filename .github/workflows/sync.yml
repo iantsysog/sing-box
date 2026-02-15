@@ -328,10 +328,10 @@ jobs:
           cp -rp packages/Applications/$APPLICATION_NAME.app packages/Payload
           cd packages
           zip -qr $APPLICATION_NAME.tipa Payload
-          mv $APPLICATION_NAME.tipa ../../${APPLICATION_NAME}-${VERSION}.tipa
-          cd ../..
+          mv $APPLICATION_NAME.tipa ../../../${APPLICATION_NAME}-${VERSION}.tipa
+          cd ../../../
 
-          gtar --zstd -cf "sing-box-${VERSION}-ios.tipa.tar.zst" "sing-box-${VERSION}.tipa"
+          gtar --zstd -cf "${APPLICATION_NAME}-${VERSION}.tipa.tar.zst" "${APPLICATION_NAME}-${VERSION}.tipa"
       - uses: actions/upload-artifact@v6
         with:
           name: ios-tipa
